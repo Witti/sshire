@@ -38,6 +38,13 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
+          # Cargo.lock also records the package's own version; after bumping
+          # Cargo.toml run `cargo build` (or `cargo update -p sshire`) and commit it.
+          locked="$(grep -A1 '^name = "sshire"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
+          if [ "$locked" != "$version" ]; then
+            echo "::error::Cargo.lock still has sshire $locked – run 'cargo build' and commit Cargo.lock"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:

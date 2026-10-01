@@ -257,7 +257,8 @@ a GitHub release with `SHA256SUMS` and auto-generated release notes, and updates
 the Homebrew tap.
 
 ```sh
-# 1. Bump version in Cargo.toml (must match the tag), commit
+# 1. Bump version in Cargo.toml (must match the tag), run `cargo build`
+#    so Cargo.lock picks up the new version, commit both files
 # 2. Create and push the tag
 git tag v0.2.0
 git push origin v0.2.0
