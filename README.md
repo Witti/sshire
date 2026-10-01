@@ -19,15 +19,22 @@ A TUI SSH launcher in Rust as an alternative to `sshs` — with independent host
 
 ## Installation
 
-### Prerequisites
+> Replace `<owner>` below with the GitHub user or organization that hosts sshire.
 
-- **Rust**: macOS via `brew install rustup`, then `rustup default stable`. Linux: see [rustup.rs](https://rustup.rs/).
-  - PATH note for macOS: add `/opt/homebrew/opt/rustup/bin` to `PATH` before running `cargo` commands.
-- **OpenSSH ≥ 8.4**: For the password feature (usually already installed).
+### Homebrew (macOS and Linux) – recommended
 
-### Install pre-built binary
+```sh
+brew install <owner>/tap/sshire
+```
 
-Extract the archive for your platform and place `sshire` in your `PATH`:
+This installs the pre-built binary from the latest GitHub release – no Rust
+toolchain needed, and no Gatekeeper prompt on macOS. Update with
+`brew upgrade sshire`, remove with `brew uninstall sshire`.
+
+### Pre-built binary
+
+Download the archive for your platform from the GitHub releases page, extract it
+and place `sshire` in your `PATH`:
 
 ```sh
 tar -xzf sshire-<version>-macos-universal.tar.gz
@@ -44,38 +51,21 @@ xattr -d com.apple.quarantine /usr/local/bin/sshire
 The Linux archives contain statically linked binaries (musl) and run without
 additional dependencies on virtually any distribution.
 
-### Build release archives yourself
+### From source
+
+Requires Rust (macOS: `brew install rustup` then `rustup default stable`;
+Linux: see [rustup.rs](https://rustup.rs/)).
 
 ```sh
-./scripts/release.sh            # macOS universal + Linux x86_64/aarch64 (requires Docker)
-./scripts/release.sh --no-linux # macOS only
-```
-
-Results are in `dist/` including `SHA256SUMS`.
-
-### Release via GitHub
-
-Pushing a version tag triggers the workflow [`.github/workflows/release.yml`](.github/workflows/release.yml):
-it checks fmt/clippy/tests on macOS and Linux, builds all three archives, and creates
-a GitHub release with `SHA256SUMS` and auto-generated release notes.
-
-```sh
-# 1. Bump version in Cargo.toml (must match the tag), commit
-# 2. Create and push tag
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-Tags with hyphens (e.g. `v0.2.0-rc.1`) are published as pre-releases.
-
-### Install from source
-
-```sh
-cd sshire   # Project directory
+git clone https://github.com/<owner>/sshire.git
+cd sshire
 cargo install --path .
 ```
 
-After successful installation, `sshire` runs from anywhere.
+### Requirements
+
+- **OpenSSH ≥ 8.4** for the password feature (macOS and current Linux
+  distributions ship a newer version).
 
 ## Usage
 
@@ -249,6 +239,61 @@ cargo test
 ```
 
 No `unwrap()` or `expect()` outside tests (except with a comment explaining why it is safe).
+
+## Releasing (maintainers)
+
+### Build release archives locally
+
+```sh
+./scripts/release.sh            # macOS universal + Linux x86_64/aarch64 (requires Docker)
+./scripts/release.sh --no-linux # macOS only
+```
+
+Results are in `dist/` including `SHA256SUMS`.
+
+### Release via GitHub
+
+Pushing a version tag triggers the workflow [`.github/workflows/release.yml`](.github/workflows/release.yml):
+it checks fmt/clippy/tests on macOS and Linux, builds all three archives, creates
+a GitHub release with `SHA256SUMS` and auto-generated release notes, and updates
+the Homebrew tap.
+
+```sh
+# 1. Bump version in Cargo.toml (must match the tag), commit
+# 2. Create and push the tag
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Tags with a hyphen (e.g. `v0.2.0-rc.1`) are published as pre-releases and do not
+update the Homebrew tap.
+
+### Homebrew tap setup (one time)
+
+`brew install <owner>/tap/sshire` looks for the repository
+`github.com/<owner>/homebrew-tap` and the file `Formula/sshire.rb` in it.
+The release workflow keeps that file up to date; it only needs to be set up once:
+
+1. Create a **public** repository named `homebrew-tap` under the same owner as
+   sshire (an empty repository with a README is fine).
+2. Create a fine-grained personal access token (GitHub → Settings → Developer
+   settings → Fine-grained tokens) with access to **only** the `homebrew-tap`
+   repository and the permission **Contents: Read and write**.
+3. Add it to the sshire repository as an Actions secret named
+   `HOMEBREW_TAP_TOKEN` (Settings → Secrets and variables → Actions).
+4. Push a version tag. After the release, the `Update Homebrew tap` job commits
+   the generated formula to the tap.
+
+Without the secret the job is skipped and the release still succeeds. To create
+or fix the formula by hand, generate it from a release's checksums:
+
+```sh
+scripts/homebrew-formula.sh 0.2.0 dist/SHA256SUMS <owner>/sshire > Formula/sshire.rb
+```
+
+Getting into the official `homebrew/core` (so that a plain `brew install sshire`
+works) requires a project with an established user base and a source build;
+the own tap is the usual way to start.
 
 ## License
 

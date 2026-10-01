@@ -136,3 +136,53 @@ jobs:
             --title "sshire $GITHUB_REF_NAME" \
             --generate-notes \
             $prerelease
+
+  # Updates the formula in the Homebrew tap (`<owner>/homebrew-tap`), so users
+  # get the new version with `brew upgrade sshire`. Runs only for stable tags
+  # and only if the repository secret HOMEBREW_TAP_TOKEN is set (a fine-grained
+  # token with "Contents: read and write" on the tap repository).
+  homebrew:
+    name: Update Homebrew tap
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_REPO: ${{ github.repository_owner }}/homebrew-tap
+    steps:
+      - name: Check for tap token
+        id: token
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN not set – skipping Homebrew tap update"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.present == 'true'
+
+      - name: Download checksums from the release
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS
+
+      - name: Commit formula to the tap
+        if: steps.token.outputs.present == 'true'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          scripts/homebrew-formula.sh "$version" SHA256SUMS "$GITHUB_REPOSITORY" > tap/Formula/sshire.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/sshire.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date"
+          else
+            git commit -m "sshire $version"
+            git push
+          fi
