@@ -40,7 +40,6 @@ cat <<EOF
 class Sshire < Formula
   desc "TUI SSH launcher with host management, tags, connection log and password storage"
   homepage "https://github.com/$REPO"
-  version "$VERSION"
   license any_of: ["MIT", "Apache-2.0"]
 
   # Plain if-branches instead of on_macos/on_linux blocks: Homebrew style rules
