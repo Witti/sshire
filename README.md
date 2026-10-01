@@ -19,12 +19,10 @@ A TUI SSH launcher in Rust as an alternative to `sshs` — with independent host
 
 ## Installation
 
-> Replace `<owner>` below with the GitHub user or organization that hosts sshire.
-
 ### Homebrew (macOS and Linux) – recommended
 
 ```sh
-brew install <owner>/tap/sshire
+brew install witti/tap/sshire
 ```
 
 This installs the pre-built binary from the latest GitHub release – no Rust
@@ -33,7 +31,7 @@ toolchain needed, and no Gatekeeper prompt on macOS. Update with
 
 ### Pre-built binary
 
-Download the archive for your platform from the GitHub releases page, extract it
+Download the archive for your platform from the [releases page](https://github.com/witti/sshire/releases), extract it
 and place `sshire` in your `PATH`:
 
 ```sh
@@ -57,7 +55,7 @@ Requires Rust (macOS: `brew install rustup` then `rustup default stable`;
 Linux: see [rustup.rs](https://rustup.rs/)).
 
 ```sh
-git clone https://github.com/<owner>/sshire.git
+git clone https://github.com/witti/sshire.git
 cd sshire
 cargo install --path .
 ```
@@ -270,8 +268,8 @@ update the Homebrew tap.
 
 ### Homebrew tap setup (one time)
 
-`brew install <owner>/tap/sshire` looks for the repository
-`github.com/<owner>/homebrew-tap` and the file `Formula/sshire.rb` in it.
+`brew install witti/tap/sshire` looks for the repository
+`github.com/witti/homebrew-tap` and the file `Formula/sshire.rb` in it.
 The release workflow keeps that file up to date; it only needs to be set up once:
 
 1. Create a **public** repository named `homebrew-tap` under the same owner as
@@ -288,7 +286,7 @@ Without the secret the job is skipped and the release still succeeds. To create
 or fix the formula by hand, generate it from a release's checksums:
 
 ```sh
-scripts/homebrew-formula.sh 0.2.0 dist/SHA256SUMS <owner>/sshire > Formula/sshire.rb
+scripts/homebrew-formula.sh 0.2.0 dist/SHA256SUMS witti/sshire > Formula/sshire.rb
 ```
 
 Getting into the official `homebrew/core` (so that a plain `brew install sshire`

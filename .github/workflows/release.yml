@@ -174,6 +174,8 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          # An empty tap repository has no branch yet; always work on main.
+          git -C tap checkout -B main
           mkdir -p tap/Formula
           scripts/homebrew-formula.sh "$version" SHA256SUMS "$GITHUB_REPOSITORY" > tap/Formula/sshire.rb
           cd tap
@@ -184,5 +186,5 @@ jobs:
             echo "Formula already up to date"
           else
             git commit -m "sshire $version"
-            git push
+            git push origin main
           fi
