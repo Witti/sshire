@@ -1,6 +1,6 @@
 [package]
 name = "sshire"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "TUI SSH launcher with host management, icons, tags, connection log and secure password storage"
 license = "MIT OR Apache-2.0"
