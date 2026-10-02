@@ -287,6 +287,29 @@ cargo test
 
 No `unwrap()` or `expect()` outside tests (except with a comment explaining why it is safe).
 
+### Test suite
+
+| Where | What |
+|-------|------|
+| `src/**` (`#[cfg(test)]`) | Unit tests for every module: parsing, command building, store, secrets, TUI state and rendering |
+| `tests/cli.rs` | End-to-end tests of every CLI command with the real binary in an isolated sandbox (fake `ssh`) |
+| `tests/sessions.rs` | `sftp`, `mount`, `umount` end to end with fake `sftp`/`sshfs` (argument translation, password hand-over, mount points) |
+| `tests/askpass.rs` | The askpass protocol and password hand-over to ssh |
+| `tests/live_sshd.rs` | Against a real OpenSSH server with real `ssh`, `sftp` and `sshfs` (ignored by default) |
+
+The live tests need a server and are therefore `#[ignore]`d; see the top of
+`tests/live_sshd.rs` for the environment variables, then run:
+
+```sh
+cargo test --test live_sshd -- --ignored --test-threads=1
+```
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request
+and on pushes to `main`: format, clippy and all tests on Linux and macOS, plus
+the live tests against a real `sshd` (with sshfs) on Linux.
+
 ## Releasing (maintainers)
 
 ### Build release archives locally
