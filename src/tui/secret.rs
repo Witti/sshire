@@ -13,6 +13,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use super::input::MaskedInput;
+use crate::connect::Session;
 use crate::secrets::SecretString;
 use crate::store::Host;
 
@@ -37,8 +38,9 @@ pub enum Step {
 pub enum Intent {
     /// Set, change or remove the host password (`p`).
     SetPassword,
-    /// Only unlock, then connect (Enter on a host with a password).
-    Connect(Box<Host>),
+    /// Only unlock, then start the session (Enter, F or m on a host with a
+    /// password).
+    Connect(Box<Host>, Session),
 }
 
 /// What a key press did in the dialog.
@@ -76,9 +78,10 @@ impl SecretDialog {
         Self::new(host, Step::EnterPassword, Intent::SetPassword)
     }
 
-    /// Dialog that only unlocks and then connects to `host`.
-    pub fn for_connect(host: Host) -> Self {
-        let mut dialog = Self::new(&host, Step::Unlock, Intent::Connect(Box::new(host.clone())));
+    /// Dialog that only unlocks and then starts `session` with `host`.
+    pub fn for_connect(host: Host, session: Session) -> Self {
+        let intent = Intent::Connect(Box::new(host.clone()), session);
+        let mut dialog = Self::new(&host, Step::Unlock, intent);
         dialog.has_password = true;
         dialog
     }

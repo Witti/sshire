@@ -564,6 +564,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             Mode::Normal | Mode::Help => &[
                 ("↑↓/jk", "select"),
                 ("⏎", "connect"),
+                ("F", "sftp"),
+                ("m", "mount"),
                 ("/", "search"),
                 ("a", "new"),
                 ("e", "edit"),
@@ -597,6 +599,8 @@ pub(super) const HELP: &[(&str, &str)] = &[
     ("g / Home", "jump to the start"),
     ("G / End", "jump to the end"),
     ("Enter", "connect to the host"),
+    ("F", "open an SFTP session"),
+    ("m", "mount with sshfs / unmount again"),
     ("/", "search (fuzzy; #tag filters by tag)"),
     ("Esc", "clear / close the search"),
     ("f", "toggle favorite"),

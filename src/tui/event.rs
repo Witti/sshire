@@ -52,6 +52,8 @@ fn normal_key(has_filter: bool, code: KeyCode) -> Option<Action> {
         KeyCode::Home | KeyCode::Char('g') => Action::First,
         KeyCode::End | KeyCode::Char('G') => Action::Last,
         KeyCode::Enter => Action::Connect,
+        KeyCode::Char('F') => Action::Sftp,
+        KeyCode::Char('m') => Action::ToggleMount,
         KeyCode::Char('f') => Action::ToggleFavorite,
         KeyCode::Char('s') => Action::CycleSort,
         KeyCode::Char('a') => Action::NewHost,
@@ -104,6 +106,8 @@ mod tests {
         assert_eq!(n(KeyCode::Char('G')), Some(Action::Last));
         assert_eq!(n(KeyCode::Char('/')), Some(Action::OpenSearch));
         assert_eq!(n(KeyCode::Enter), Some(Action::Connect));
+        assert_eq!(n(KeyCode::Char('F')), Some(Action::Sftp));
+        assert_eq!(n(KeyCode::Char('m')), Some(Action::ToggleMount));
         assert_eq!(n(KeyCode::Esc), None);
         assert_eq!(
             key_to_action(Mode::Normal, true, key(KeyCode::Esc)),

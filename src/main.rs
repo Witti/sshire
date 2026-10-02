@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
+use crate::connect::{Programs, Session};
 use crate::store::Store;
 
 // `ExitCode` controls the process's exit code. `Result<ExitCode>`: on
@@ -55,12 +56,22 @@ fn main() -> Result<ExitCode> {
             commands::list(&store, tag.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Connect { alias } => {
+        Command::Connect { alias } => run_session(&alias, |_| Ok(Session::Shell)),
+        Command::Sftp { alias } => run_session(&alias, |_| Ok(Session::Sftp)),
+        Command::Mount(args) => run_session(&args.alias, |programs| {
+            let target = commands::mount_target(
+                programs,
+                &args.alias,
+                args.mountpoint.as_deref(),
+                args.path,
+            )?;
+            Ok(Session::Mount(target))
+        }),
+        Command::Umount { alias, mountpoint } => {
             let store = commands::open_store()?;
-            let config = load_config_cli()?;
-            let code = commands::connect(&store, &alias, &config.ssh)?;
-            // Exit codes are 0..=255; anything else is mapped to 255.
-            Ok(ExitCode::from(u8::try_from(code).unwrap_or(255)))
+            let programs = Programs::from(&load_config_cli()?);
+            commands::umount(&store, &alias, &programs, mountpoint.as_deref())?;
+            Ok(ExitCode::SUCCESS)
         }
         Command::Log { alias, limit } => {
             let store = commands::open_store()?;
@@ -91,6 +102,23 @@ fn main() -> Result<ExitCode> {
         }
         Command::Askpass { prompt } => Ok(run_askpass(&prompt)),
     }
+}
+
+/// `sshire connect | sftp | mount`: starts a session with a host and returns
+/// the exit code of the started program.
+///
+/// `session` builds the session kind from the loaded program settings (the
+/// mount point depends on `[mount] dir`).
+fn run_session(
+    alias: &str,
+    session: impl FnOnce(&Programs) -> Result<Session>,
+) -> Result<ExitCode> {
+    let store = commands::open_store()?;
+    let programs = Programs::from(&load_config_cli()?);
+    let session = session(&programs)?;
+    let code = commands::connect(&store, alias, &programs, &session)?;
+    // Exit codes are 0..=255; anything else is mapped to 255.
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(255)))
 }
 
 /// Checks whether ssh started us as `SSH_ASKPASS` (see `connect::askpass`).

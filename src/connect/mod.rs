@@ -2,26 +2,29 @@
 //!
 //! * `askpass` - hands ssh the password over a private Unix socket (T7)
 //! * `sigguard` - lets sshire survive Ctrl-C while ssh is running
-//! * `command` - builds the ssh invocation from a host (pure functions)
-//! * this module - starts ssh, evaluates the exit status, writes the log
+//! * `command` - builds the ssh/sftp/sshfs invocation from a host (pure functions)
+//! * `mount` - mount points and unmounting for sshfs
+//! * this module - starts the program, evaluates the exit status, writes the log
 //!
 //! There is deliberately no terminal logic here: the TUI (T5) must suspend the
 //! terminal *before* [`run`] and restore it afterwards.
 
 pub mod askpass;
 mod command;
+pub mod mount;
 mod sigguard;
 
 use std::fmt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use crate::config::SshConfig;
+use crate::config::{Config, MountConfig, SftpConfig, SshConfig};
 use crate::store::{ConnectionStatus, Host, Store};
 
-pub use command::{SshInvocation, build_invocation};
+pub use command::{SshInvocation, build_invocation, build_mount_invocation, build_sftp_invocation};
 
 use crate::secrets::SecretString;
 use askpass::AskpassServer;
@@ -37,6 +40,44 @@ impl fmt::Display for ConnectionStatus {
         match self {
             Self::Success => write!(f, "success"),
             Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// What kind of session to start with a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Session {
+    /// An interactive ssh session.
+    Shell,
+    /// An interactive sftp session.
+    Sftp,
+    /// Mount the host with sshfs.
+    Mount(MountTarget),
+}
+
+/// Where and what to mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountTarget {
+    /// Local directory to mount at (created if needed).
+    pub mountpoint: PathBuf,
+    /// Remote directory; `None` is the home directory of the user.
+    pub remote_path: Option<String>,
+}
+
+/// The program settings of all session kinds (`[ssh]`, `[sftp]`, `[mount]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Programs {
+    pub ssh: SshConfig,
+    pub sftp: SftpConfig,
+    pub mount: MountConfig,
+}
+
+impl From<&Config> for Programs {
+    fn from(config: &Config) -> Self {
+        Self {
+            ssh: config.ssh.clone(),
+            sftp: config.sftp.clone(),
+            mount: config.mount.clone(),
         }
     }
 }
@@ -76,21 +117,45 @@ pub fn classify(exit: Option<i32>) -> ConnectionStatus {
     }
 }
 
-/// Connects to `host` with the real `ssh` and logs the session.
+/// Classification for sshfs: it reports every failure with a non-zero exit
+/// code (usually 1, not 255 like ssh); success means "mounted".
+fn classify_mount(exit: Option<i32>) -> ConnectionStatus {
+    match exit {
+        Some(0) => ConnectionStatus::Success,
+        _ => ConnectionStatus::Failed,
+    }
+}
+
+/// Starts a session of the given kind with `host` and logs it.
 ///
 /// `password` is the host password (fetched by the caller *before* leaving the
 /// terminal). It is never written into arguments or the environment, but is
-/// delivered through [`AskpassServer`] as soon as ssh asks for it.
+/// delivered through [`AskpassServer`] as soon as ssh asks for it. sftp and
+/// sshfs start ssh themselves; it inherits the askpass variables.
 ///
-/// `ssh` holds the `[ssh]` settings from the configuration (program and
-/// global extra arguments).
+/// `programs` holds the program settings from the configuration.
 pub fn run(
     store: &Store,
     host: &Host,
     password: Option<SecretString>,
-    ssh: &SshConfig,
+    programs: &Programs,
+    session: &Session,
 ) -> Result<ConnectOutcome> {
-    let mut invocation = build_invocation(host, ssh)?;
+    let mut invocation = match session {
+        Session::Shell => build_invocation(host, &programs.ssh)?,
+        Session::Sftp => build_sftp_invocation(host, &programs.ssh, &programs.sftp)?,
+        Session::Mount(target) => build_mount_invocation(
+            host,
+            &programs.ssh,
+            &programs.mount,
+            target.remote_path.as_deref(),
+            &target.mountpoint,
+        )?,
+    };
+    let classify_exit = match session {
+        Session::Mount(_) => classify_mount,
+        Session::Shell | Session::Sftp => classify,
+    };
     // The underscore-prefixed name `_askpass` keeps the server alive until the
     // end of the function (a bare `_` would drop the value immediately!). After
     // that, its `Drop` cleans up the thread, socket and directory - even on
@@ -106,7 +171,20 @@ pub fn run(
         }
         None => None,
     };
-    run_invocation(store, host.id, &invocation)
+    // The mount point is created last, so no early error leaves it behind;
+    // if this call created it, a failed mount removes it again.
+    let created_mountpoint = match session {
+        Session::Mount(target) if mount::prepare_mountpoint(&target.mountpoint)? => {
+            Some(target.mountpoint.as_path())
+        }
+        _ => None,
+    };
+    let outcome = run_invocation(store, host.id, &invocation, classify_exit);
+    let mounted = matches!(&outcome, Ok(o) if o.status == ConnectionStatus::Success);
+    if let (Some(path), false) = (created_mountpoint, mounted) {
+        mount::remove_mountpoint(path);
+    }
+    outcome
 }
 
 /// Extends the ssh invocation with everything password hand-over needs:
@@ -128,10 +206,14 @@ fn apply_askpass(
 
 /// Starts a finished invocation and maintains the log. Separate from [`run`]
 /// so tests can substitute a fake program for `ssh`.
+///
+/// `classify_exit` turns the exit code into the log verdict ([`classify`]
+/// for ssh and sftp).
 fn run_invocation(
     store: &Store,
     host_id: i64,
     invocation: &SshInvocation,
+    classify_exit: fn(Option<i32>) -> ConnectionStatus,
 ) -> Result<ConnectOutcome> {
     // From here on sshire survives Ctrl-C (SIGINT) and Ctrl-\ (SIGQUIT); ssh
     // receives the signals normally. The guard lives until the end of the
@@ -166,7 +248,7 @@ fn run_invocation(
     // `ExitStatus::code()` is `None` if the process ended due to a signal.
     let exit_code = status.code();
     let signal = signal_of(&status);
-    let outcome_status = classify(exit_code);
+    let outcome_status = classify_exit(exit_code);
     store
         .finish_connection(log_id, exit_code, outcome_status)
         .context("could not finish the connection log")?;
@@ -236,7 +318,7 @@ mod tests {
     fn success_is_logged() {
         let store = Store::open_in_memory().unwrap();
         let id = store.insert_host(&NewHost::new("a")).unwrap();
-        let out = run_invocation(&store, id, &fake("true", &[])).unwrap();
+        let out = run_invocation(&store, id, &fake("true", &[]), classify).unwrap();
         assert_eq!(out.exit_code, Some(0));
         assert_eq!(out.status, ConnectionStatus::Success);
         let log = store.recent_connections(Some(id), 10).unwrap();
@@ -250,7 +332,7 @@ mod tests {
     fn exit_255_is_failed() {
         let store = Store::open_in_memory().unwrap();
         let id = store.insert_host(&NewHost::new("a")).unwrap();
-        let out = run_invocation(&store, id, &fake("sh", &["-c", "exit 255"])).unwrap();
+        let out = run_invocation(&store, id, &fake("sh", &["-c", "exit 255"]), classify).unwrap();
         assert_eq!(out.exit_code, Some(255));
         assert_eq!(out.status, ConnectionStatus::Failed);
         let log = store.recent_connections(Some(id), 10).unwrap();
@@ -261,7 +343,7 @@ mod tests {
     fn other_exit_code_is_success() {
         let store = Store::open_in_memory().unwrap();
         let id = store.insert_host(&NewHost::new("a")).unwrap();
-        let out = run_invocation(&store, id, &fake("sh", &["-c", "exit 7"])).unwrap();
+        let out = run_invocation(&store, id, &fake("sh", &["-c", "exit 7"]), classify).unwrap();
         assert_eq!(out.exit_code, Some(7));
         assert_eq!(out.status, ConnectionStatus::Success);
     }
@@ -271,7 +353,7 @@ mod tests {
     fn signal_death_is_failed_without_exit_code() {
         let store = Store::open_in_memory().unwrap();
         let id = store.insert_host(&NewHost::new("a")).unwrap();
-        let out = run_invocation(&store, id, &fake("sh", &["-c", "kill -9 $$"])).unwrap();
+        let out = run_invocation(&store, id, &fake("sh", &["-c", "kill -9 $$"]), classify).unwrap();
         assert_eq!(out.exit_code, None);
         assert_eq!(out.signal, Some(9));
         assert_eq!(out.status, ConnectionStatus::Failed);
@@ -284,7 +366,12 @@ mod tests {
     fn missing_program_closes_log_as_failed_and_errors() {
         let store = Store::open_in_memory().unwrap();
         let id = store.insert_host(&NewHost::new("a")).unwrap();
-        let res = run_invocation(&store, id, &fake("sshire-no-such-program-xyz", &[]));
+        let res = run_invocation(
+            &store,
+            id,
+            &fake("sshire-no-such-program-xyz", &[]),
+            classify,
+        );
         assert!(res.is_err());
         let log = store.recent_connections(Some(id), 10).unwrap();
         assert_eq!(log.len(), 1);
@@ -299,8 +386,13 @@ mod tests {
         let id = store.insert_host(&NewHost::new("a")).unwrap();
         // The child sends SIGINT to its parent process (= this test).
         // Without the guard the test process would die.
-        let out =
-            run_invocation(&store, id, &fake("sh", &["-c", "kill -INT $PPID; exit 0"])).unwrap();
+        let out = run_invocation(
+            &store,
+            id,
+            &fake("sh", &["-c", "kill -INT $PPID; exit 0"]),
+            classify,
+        )
+        .unwrap();
         assert_eq!(out.status, ConnectionStatus::Success);
         let log = store.recent_connections(Some(id), 10).unwrap();
         assert_eq!(log[0].status, Some(ConnectionStatus::Success));
@@ -314,8 +406,13 @@ mod tests {
         // the child sends itself SIGINT and must die from it.
         let store = Store::open_in_memory().unwrap();
         let id = store.insert_host(&NewHost::new("a")).unwrap();
-        let out =
-            run_invocation(&store, id, &fake("sh", &["-c", "kill -INT $$; sleep 1"])).unwrap();
+        let out = run_invocation(
+            &store,
+            id,
+            &fake("sh", &["-c", "kill -INT $$; sleep 1"]),
+            classify,
+        )
+        .unwrap();
         assert_eq!(out.signal, Some(2));
         assert_eq!(out.status, ConnectionStatus::Failed);
     }
@@ -364,6 +461,18 @@ mod tests {
         // Neither arguments nor environment (nor the Debug format) contain the password.
         let dump = format!("{invocation:?}");
         assert!(!dump.contains("top-secret-pw"));
+    }
+
+    #[test]
+    fn mount_classification_only_accepts_zero() {
+        assert_eq!(classify_mount(Some(0)), ConnectionStatus::Success);
+        assert_eq!(classify_mount(Some(1)), ConnectionStatus::Failed);
+        assert_eq!(classify_mount(None), ConnectionStatus::Failed);
+        let store = Store::open_in_memory().unwrap();
+        let id = store.insert_host(&NewHost::new("a")).unwrap();
+        let out =
+            run_invocation(&store, id, &fake("sh", &["-c", "exit 1"]), classify_mount).unwrap();
+        assert_eq!(out.status, ConnectionStatus::Failed);
     }
 
     #[test]

@@ -1,0 +1,91 @@
+# Runs the complete test suite on every pull request (and on pushes to main):
+#
+# * `check`: format, clippy and all unit + integration tests on Linux and macOS
+#   (ssh, sftp and sshfs are replaced by fake programs there)
+# * `live`: the `#[ignore]`d tests in tests/live_sshd.rs against a real
+#   OpenSSH server on localhost, with real ssh, sftp and sshfs (Linux)
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same PR cancels the run that is still in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --locked
+
+  live:
+    name: Live tests (real sshd, sftp, sshfs)
+    runs-on: ubuntu-latest
+    env:
+      SSHIRE_LIVE_HOST: 127.0.0.1
+      SSHIRE_LIVE_PORT: "2222"
+      SSHIRE_LIVE_USER: sshire-test
+      # A throwaway account on a throwaway runner, reachable only on localhost.
+      SSHIRE_LIVE_PASSWORD: live-test-Passw0rd
+      SSHIRE_LIVE_KNOWN_HOSTS: ${{ github.workspace }}/target/live_known_hosts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install OpenSSH server and sshfs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server openssh-client sshfs
+
+      - name: Start sshd with a password-only test user
+        run: |
+          sudo useradd --create-home --shell /bin/bash "$SSHIRE_LIVE_USER"
+          echo "$SSHIRE_LIVE_USER:$SSHIRE_LIVE_PASSWORD" | sudo chpasswd
+          sudo -u "$SSHIRE_LIVE_USER" mkdir -p "/home/$SSHIRE_LIVE_USER/data"
+          echo hello-from-sshd | sudo -u "$SSHIRE_LIVE_USER" tee "/home/$SSHIRE_LIVE_USER/data/hello.txt" >/dev/null
+          sudo mkdir -p /run/sshd
+          sudo ssh-keygen -A
+          sudo /usr/sbin/sshd -p "$SSHIRE_LIVE_PORT" \
+            -o ListenAddress=127.0.0.1 \
+            -o PasswordAuthentication=yes \
+            -o KbdInteractiveAuthentication=no \
+            -o PubkeyAuthentication=no \
+            -o "AllowUsers=$SSHIRE_LIVE_USER"
+          mkdir -p target
+          for _ in $(seq 1 20); do
+            ssh-keyscan -p "$SSHIRE_LIVE_PORT" 127.0.0.1 > "$SSHIRE_LIVE_KNOWN_HOSTS" 2>/dev/null && [ -s "$SSHIRE_LIVE_KNOWN_HOSTS" ] && break
+            sleep 0.5
+          done
+          test -s "$SSHIRE_LIVE_KNOWN_HOSTS"
+
+      - name: Live tests
+        run: cargo test --locked --test live_sshd -- --ignored --test-threads=1

@@ -1,4 +1,4 @@
-//! Implementation of the CLI commands `list`, `connect` and `log`.
+//! Implementation of the CLI commands `list`, `connect`/`sftp`/`mount`/`umount` and `log`.
 //!
 //! The rendering functions (`render_host_table`, `render_log_table`) are
 //! kept separate from the database and terminal so they can be tested.
@@ -9,8 +9,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::{AddArgs, PasswdArgs};
-use crate::config::SshConfig;
-use crate::connect;
+use crate::connect::{self, Programs, Session};
 use crate::export;
 use crate::paths;
 use crate::secrets::{
@@ -161,48 +160,126 @@ pub fn list(store: &Store, tag: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Describes the result of a connection in one sentence (without the ✔/✘ symbol).
+/// Describes the result of a session in one sentence (without the ✔/✘ symbol).
 ///
-/// Shared by the CLI (`connect`) and the TUI.
-pub fn describe_outcome(alias: &str, outcome: &connect::ConnectOutcome) -> String {
+/// Shared by the CLI (`connect`, `sftp`, `mount`) and the TUI.
+pub fn describe_outcome(
+    alias: &str,
+    outcome: &connect::ConnectOutcome,
+    session: &Session,
+) -> String {
     let duration = timefmt::format_duration(i64::try_from(outcome.duration_ms).unwrap_or(i64::MAX));
+    if let Session::Mount(target) = session {
+        return match (outcome.status, outcome.exit_code, outcome.signal) {
+            (ConnectionStatus::Success, ..) => {
+                format!("Mounted {alias} at {}", target.mountpoint.display())
+            }
+            (_, Some(code), _) => format!("Mounting {alias} failed (exit {code})"),
+            (_, None, Some(sig)) => format!("Mounting {alias} aborted (signal {sig})"),
+            (_, None, None) => format!("Mounting {alias} failed"),
+        };
+    }
+    let what = match session {
+        Session::Sftp => "SFTP session",
+        _ => "Connection",
+    };
     match (outcome.status, outcome.exit_code, outcome.signal) {
         (ConnectionStatus::Success, code, _) => {
             let exit = code.map_or_else(String::new, |c| format!(", exit {c}"));
-            format!("Connection to {alias} ended ({duration}{exit})")
+            format!("{what} to {alias} ended ({duration}{exit})")
         }
         (_, Some(code), _) => {
-            format!("Connection to {alias} failed (exit {code}, {duration})")
+            format!("{what} to {alias} failed (exit {code}, {duration})")
         }
-        (_, None, Some(sig)) => format!("Connection to {alias} aborted (signal {sig})"),
-        (_, None, None) => format!("Connection to {alias} failed"),
+        (_, None, Some(sig)) => format!("{what} to {alias} aborted (signal {sig})"),
+        (_, None, None) => format!("{what} to {alias} failed"),
     }
 }
 
-/// `sshire connect <alias>`; returns the exit code for the sshire process.
-pub fn connect(store: &Store, alias: &str, ssh: &SshConfig) -> Result<i32> {
+/// Looks up a host that a session may be started with.
+fn usable_host(store: &Store, alias: &str) -> Result<Host> {
     let Some(host) = store.get_host_by_alias(alias)? else {
         bail!("Host \"{alias}\" not found");
     };
     if host.archived {
         bail!("Host \"{alias}\" is archived and cannot be connected to");
     }
+    Ok(host)
+}
+
+/// `sshire connect`, `sshire sftp` and `sshire mount`: starts a session of
+/// the given kind; returns the exit code for the sshire process.
+pub fn connect(store: &Store, alias: &str, programs: &Programs, session: &Session) -> Result<i32> {
+    let host = usable_host(store, alias)?;
+    // Checked here as well, so the user is not asked for the master
+    // password first.
+    if let Session::Mount(target) = session
+        && connect::mount::is_mounted(&target.mountpoint)
+    {
+        bail!(
+            "{} is already mounted (unmount it with `sshire umount {alias}`)",
+            target.mountpoint.display()
+        );
+    }
     // Fetch the password *before* starting ssh: the master password prompt
     // still belongs to sshire, not to the ssh session.
     let password = host_password_for_connect(store, &host)?;
-    let outcome = connect::run(store, &host, password, ssh)?;
+    let outcome = connect::run(store, &host, password, programs, session)?;
     let color = color_enabled(std::io::stderr().is_terminal());
     let (mark, style) = match outcome.status {
         ConnectionStatus::Success => ("✔", ansi::GREEN),
         ConnectionStatus::Failed => ("✘", ansi::RED),
     };
-    let detail = describe_outcome(alias, &outcome);
+    let detail = describe_outcome(alias, &outcome, session);
     if color {
         eprintln!("{style}{mark}{} {detail}", ansi::RESET);
     } else {
         eprintln!("{mark} {detail}");
     }
     Ok(outcome.process_exit_code())
+}
+
+/// Mount target for `sshire mount`: the given mount point or the default one.
+pub fn mount_target(
+    programs: &Programs,
+    alias: &str,
+    mountpoint: Option<&std::path::Path>,
+    remote_path: Option<String>,
+) -> Result<connect::MountTarget> {
+    let mountpoint = match mountpoint {
+        Some(path) => connect::mount::absolute(path)?,
+        None => connect::mount::default_mountpoint(&programs.mount, alias)?,
+    };
+    Ok(connect::MountTarget {
+        mountpoint,
+        remote_path,
+    })
+}
+
+/// `sshire umount <alias> [mountpoint]`.
+///
+/// The default mount point is removed again afterwards (if it is empty); a
+/// mount point given explicitly is left alone.
+pub fn umount(
+    store: &Store,
+    alias: &str,
+    programs: &Programs,
+    mountpoint: Option<&std::path::Path>,
+) -> Result<()> {
+    if store.get_host_by_alias(alias)?.is_none() {
+        bail!("Host \"{alias}\" not found");
+    }
+    let target = mount_target(programs, alias, mountpoint, None)?;
+    let path = &target.mountpoint;
+    if !connect::mount::is_mounted(path) {
+        bail!("Nothing is mounted at {}", path.display());
+    }
+    connect::mount::unmount(path)?;
+    if mountpoint.is_none() {
+        connect::mount::remove_mountpoint(path);
+    }
+    eprintln!("✔ Unmounted {alias} from {}", path.display());
+    Ok(())
 }
 
 /// Fetches a host's password for connecting (`None`: none stored).
