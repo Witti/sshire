@@ -57,6 +57,22 @@ program = "ssh"
 # Extra arguments for *all* connections; they come before the
 # host-specific options. Example: ["-o", "ServerAliveInterval=30"]
 extra_args = []
+
+[sftp]
+# Path or name of the sftp program (`sshire sftp`, key F in the TUI).
+# Host options are translated to sftp's spelling (e.g. -p becomes -P);
+# ssh-only options such as port forwardings are left out.
+program = "sftp"
+# Extra arguments for every sftp session, e.g. ["-l", "8000"]
+extra_args = []
+
+[mount]
+# Path or name of sshfs (`sshire mount`, key m in the TUI)
+program = "sshfs"
+# Hosts are mounted at <dir>/<alias> unless a mount point is given
+dir = "~/mnt"
+# sshfs/FUSE options, each passed as `-o <option>`
+options = ["reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3"]
 "#;
 
 /// TUI color scheme (a string in the file, e.g. `"tokyo-night"`).
@@ -108,6 +124,53 @@ impl Default for SshConfig {
     }
 }
 
+/// The `[sftp]` section.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SftpConfig {
+    /// The sftp program to run (a name in `PATH` or a full path).
+    pub program: String,
+    /// Extra arguments for every sftp session, placed before all others.
+    pub extra_args: Vec<String>,
+}
+
+impl Default for SftpConfig {
+    fn default() -> Self {
+        Self {
+            program: "sftp".to_owned(),
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+/// The `[mount]` section (mounting hosts with sshfs).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct MountConfig {
+    /// The sshfs program to run (a name in `PATH` or a full path).
+    pub program: String,
+    /// Base directory for mount points; `~` stands for the home directory.
+    pub dir: String,
+    /// sshfs/FUSE options, each passed as `-o <option>`.
+    pub options: Vec<String>,
+}
+
+impl Default for MountConfig {
+    fn default() -> Self {
+        Self {
+            program: "sshfs".to_owned(),
+            dir: "~/mnt".to_owned(),
+            options: [
+                "reconnect",
+                "ServerAliveInterval=15",
+                "ServerAliveCountMax=3",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        }
+    }
+}
+
 /// The complete configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -122,6 +185,10 @@ pub struct Config {
     pub icon_fallback: String,
     /// The `[ssh]` section.
     pub ssh: SshConfig,
+    /// The `[sftp]` section.
+    pub sftp: SftpConfig,
+    /// The `[mount]` section.
+    pub mount: MountConfig,
 }
 
 impl Default for Config {
@@ -132,20 +199,28 @@ impl Default for Config {
             show_archived: false,
             icon_fallback: "•".to_owned(),
             ssh: SshConfig::default(),
+            sftp: SftpConfig::default(),
+            mount: MountConfig::default(),
         }
     }
 }
 
 /// Allowed top-level keys (for the warning on typos).
-const KNOWN_KEYS: [&str; 5] = [
+const KNOWN_KEYS: [&str; 7] = [
     "theme",
     "default_sort",
     "show_archived",
     "icon_fallback",
     "ssh",
+    "sftp",
+    "mount",
 ];
-/// Allowed keys in `[ssh]`.
-const KNOWN_SSH_KEYS: [&str; 2] = ["program", "extra_args"];
+/// Allowed keys per section (for the warning on typos).
+const KNOWN_SECTION_KEYS: [(&str, &[&str]); 3] = [
+    ("ssh", &["program", "extra_args"]),
+    ("sftp", &["program", "extra_args"]),
+    ("mount", &["program", "dir", "options"]),
+];
 
 /// Path of the configuration file (the file itself need not exist).
 pub fn config_path() -> Result<PathBuf> {
@@ -191,19 +266,22 @@ pub fn parse(text: &str) -> Result<(Config, Vec<String>)> {
     Ok((config, warnings))
 }
 
-/// All keys (with an `ssh.` prefix for the section) that we do not know.
+/// All keys (with a `section.` prefix inside sections) that we do not know.
 fn unknown_keys(table: &toml::Table) -> Vec<String> {
     let mut unknown: Vec<String> = table
         .keys()
         .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
         .cloned()
         .collect();
-    if let Some(ssh) = table.get("ssh").and_then(toml::Value::as_table) {
-        unknown.extend(
-            ssh.keys()
-                .filter(|k| !KNOWN_SSH_KEYS.contains(&k.as_str()))
-                .map(|k| format!("ssh.{k}")),
-        );
+    for (section, known) in KNOWN_SECTION_KEYS {
+        if let Some(table) = table.get(section).and_then(toml::Value::as_table) {
+            unknown.extend(
+                table
+                    .keys()
+                    .filter(|k| !known.contains(&k.as_str()))
+                    .map(|k| format!("{section}.{k}")),
+            );
+        }
     }
     unknown
 }
@@ -213,6 +291,15 @@ impl Config {
     fn validate(&self) -> Result<()> {
         if self.ssh.program.trim().is_empty() {
             bail!("ssh.program must not be empty");
+        }
+        if self.sftp.program.trim().is_empty() {
+            bail!("sftp.program must not be empty");
+        }
+        if self.mount.program.trim().is_empty() {
+            bail!("mount.program must not be empty");
+        }
+        if self.mount.dir.trim().is_empty() {
+            bail!("mount.dir must not be empty");
         }
         // A "character" in the user's sense is a grapheme cluster
         // (emojis often consist of several `char`s).
@@ -310,6 +397,28 @@ mod tests {
     }
 
     #[test]
+    fn sftp_and_mount_sections_parse() {
+        let config = ok(r#"
+            [sftp]
+            program = "/usr/bin/sftp"
+            extra_args = ["-l", "8000"]
+            [mount]
+            program = "/usr/local/bin/sshfs"
+            dir = "/Volumes/remote"
+            options = ["reconnect"]
+        "#);
+        assert_eq!(config.sftp.program, "/usr/bin/sftp");
+        assert_eq!(config.sftp.extra_args, ["-l", "8000"]);
+        assert_eq!(config.mount.program, "/usr/local/bin/sshfs");
+        assert_eq!(config.mount.dir, "/Volumes/remote");
+        assert_eq!(config.mount.options, ["reconnect"]);
+        // A partial section keeps the other defaults.
+        let config = ok("[mount]\ndir = \"/tmp/m\"");
+        assert_eq!(config.mount.program, "sshfs");
+        assert_eq!(config.mount.options, MountConfig::default().options);
+    }
+
+    #[test]
     fn unknown_keys_warn_but_do_not_fail() {
         let (config, warnings) =
             parse("themee = \"latte\"\ntheme = \"latte\"\n[ssh]\nprogam = \"x\"").unwrap();
@@ -317,6 +426,10 @@ mod tests {
         assert_eq!(warnings.len(), 2);
         assert!(warnings[0].contains("themee"));
         assert!(warnings[1].contains("ssh.progam"));
+        let (_, warnings) = parse("[mount]\ndirr = \"x\"\n[sftp]\nprog = \"y\"").unwrap();
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|w| w.contains("mount.dirr")));
+        assert!(warnings.iter().any(|w| w.contains("sftp.prog")));
     }
 
     #[test]
@@ -329,6 +442,10 @@ mod tests {
             "icon_fallback = \"\"",
             "[ssh]\nprogram = \"\"",
             "[ssh]\nextra_args = \"-v\"",
+            "[sftp]\nprogram = \" \"",
+            "[mount]\nprogram = \"\"",
+            "[mount]\ndir = \"\"",
+            "[mount]\noptions = \"reconnect\"",
             "theme = ",
         ] {
             assert!(parse(bad).is_err(), "should fail: {bad}");

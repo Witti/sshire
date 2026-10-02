@@ -49,6 +49,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::commands;
 use crate::config::Config;
+use crate::connect::Session;
 use crate::secrets::SecretString;
 use crate::store::Host;
 
@@ -163,29 +164,59 @@ fn event_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
             match app.update(action) {
                 Effect::None => {}
                 Effect::Quit => return Ok(()),
-                Effect::Connect { host, password } => {
-                    connect_to(terminal, app, &host, password)?;
+                Effect::Connect {
+                    host,
+                    password,
+                    session,
+                } => {
+                    connect_to(terminal, app, &host, password, &session)?;
                 }
+                Effect::Unmount { alias, mountpoint } => unmount(app, &alias, &mountpoint),
             }
         }
     }
 }
 
-/// Releases the terminal, starts ssh (on the main thread, as `connect::run`
-/// requires) and restores the TUI afterwards.
+/// Unmounts a host. The unmount tools run with captured output, so the TUI
+/// keeps the terminal; the result shows up as a status message.
+fn unmount(app: &mut App, alias: &str, mountpoint: &std::path::Path) {
+    let (kind, text) = match crate::connect::mount::unmount(mountpoint) {
+        Ok(()) => {
+            crate::connect::mount::remove_mountpoint(mountpoint);
+            (
+                StatusKind::Success,
+                format!("✔ Unmounted {alias} from {}", mountpoint.display()),
+            )
+        }
+        Err(err) => (StatusKind::Error, format!("✘ {err:#}")),
+    };
+    app.finish_connect(kind, text);
+}
+
+/// Releases the terminal, starts the session (on the main thread, as
+/// `connect::run` requires) and restores the TUI afterwards.
 fn connect_to(
     terminal: &mut Term,
     app: &mut App,
     host: &Host,
     password: Option<SecretString>,
+    session: &Session,
 ) -> Result<()> {
     restore_terminal();
-    // Notice above the ssh session on the normal screen.
-    println!("→ connecting to {} …", host.alias);
+    // Notice above the session on the normal screen.
+    match session {
+        Session::Shell => println!("→ connecting to {} …", host.alias),
+        Session::Sftp => println!("→ opening SFTP session to {} …", host.alias),
+        Session::Mount(target) => println!(
+            "→ mounting {} at {} …",
+            host.alias,
+            target.mountpoint.display()
+        ),
+    }
 
     // `app.store()` is only visible in tests; that's why `App` exposes the store via
     // `connect_host` instead of handing it out.
-    let result = app.run_connect(host, password);
+    let result = app.run_connect(host, password, session);
 
     // Restore the terminal – even if the connection failed.
     enter_terminal()?;
@@ -211,7 +242,7 @@ fn connect_to(
                 kind,
                 format!(
                     "{mark} {}",
-                    commands::describe_outcome(&host.alias, &outcome)
+                    commands::describe_outcome(&host.alias, &outcome, session)
                 ),
             )
         }

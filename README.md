@@ -8,6 +8,7 @@ A TUI SSH launcher in Rust as an alternative to `sshs` — with independent host
 - **Host Management**: Create/edit hosts manually or auto-import from `~/.ssh/config`
 - **Icons & Tags**: Each host can have a symbol (emoji/Unicode) and any number of tags
 - **Secure Passwords**: macOS Keychain or Linux encryption (XChaCha20-Poly1305 + Argon2id) with master password; 🔑 marking in the host list
+- **SFTP & Mount**: Open an SFTP session or mount a host's file system via sshfs – with the same host options and stored password
 - **Connection Log**: Success/failure status and duration of each SSH connection
 - **CLI Mode**: List hosts, connect, manage passwords — all without the TUI
 - **Export**: Export hosts as JSON (without passwords)
@@ -64,6 +65,10 @@ cargo install --path .
 
 - **OpenSSH ≥ 8.4** for the password feature (macOS and current Linux
   distributions ship a newer version).
+- **sshfs** for mounting hosts (optional):
+  - macOS: install [macFUSE](https://macfuse.github.io/) and sshfs
+    (e.g. `brew install --cask macfuse` and the sshfs package from the macFUSE site)
+  - Linux: `sudo apt install sshfs` / `sudo dnf install fuse-sshfs` / `sudo pacman -S sshfs`
 
 ## Usage
 
@@ -85,6 +90,8 @@ Without additional arguments, the interactive terminal interface opens.
 | `g` / `G` / `Home` / `End` | Jump to start/end |
 | **Actions** | |
 | `Enter` | Connect to selected host |
+| `F` | Open an SFTP session to the selected host |
+| `m` | Mount the selected host via sshfs (or unmount it if mounted) |
 | `/` | Search (fuzzy; `#tag` filters by tag) |
 | `Esc` | Clear/close search |
 | `f` | Toggle favorite |
@@ -112,6 +119,16 @@ sshire list --tag prod        # Only hosts with tag 'prod'
 
 # Connect to a host
 sshire connect web            # Connect to host 'web'
+
+# SFTP session
+sshire sftp web               # Interactive sftp with the host's options and password
+
+# Mount via sshfs
+sshire mount web              # Mounts the home directory at ~/mnt/web
+sshire mount web --path /var/www          # Mount a specific remote directory
+sshire mount web ~/Projects/web-remote    # Custom local mount point
+sshire umount web             # Unmount again (alias: unmount)
+sshire umount web ~/Projects/web-remote   # Unmount a custom mount point
 
 # Show connection log
 sshire log                     # All entries (default: last 20)
@@ -143,6 +160,27 @@ sshire stores its data in the platform-standard directory:
 - **Linux**: `~/.local/share/sshire/` and `~/.config/sshire/` (XDG standard)
 
 The database file is called `sshire.db` (SQLite). The `~/.ssh/config` is read on startup and via `sshire import`, but **never written**.
+
+## SFTP and mounting
+
+`sshire sftp` and `sshire mount` use the same host settings as `sshire connect`:
+
+- **ssh_config hosts** are addressed by their alias, so sftp/sshfs read
+  `~/.ssh/config` themselves.
+- **Manual hosts**: port, key file, jump host and extra arguments are translated
+  into the spelling of sftp (`-P` instead of `-p`, …) or sshfs (`-o Port=…`,
+  `-o IdentityFile=…`, `-o ProxyJump=…`). Options that only make sense for an
+  interactive shell (port forwardings, `-t`, remote commands, …) are left out.
+- A different `[ssh] program` is passed on via `sftp -S` / `sshfs -o ssh_command=`.
+- **Stored passwords** are delivered exactly as for ssh (askpass, see below):
+  sftp and sshfs start ssh themselves, which inherits the askpass hand-over.
+
+sshfs authenticates in the foreground (host key prompts appear in the terminal)
+and then keeps running in the background. The mount point is created if needed
+and removed again after `sshire umount` (or a failed mount) if it was the
+default one and is empty. Unmounting uses `fusermount3 -u`/`fusermount -u` on
+Linux and `umount`/`diskutil unmount` on macOS. SFTP sessions and mounts appear
+in the connection log like ssh sessions.
 
 ## Passwords & Security
 
@@ -194,6 +232,17 @@ icon_fallback = "•"
 [ssh]
 program = "ssh"
 extra_args = []  # e.g. ["-v"] for verbose output
+
+# SFTP sessions (`sshire sftp`, key F)
+[sftp]
+program = "sftp"
+extra_args = []  # e.g. ["-l", "8000"] to limit bandwidth
+
+# Mounting via sshfs (`sshire mount`, key m)
+[mount]
+program = "sshfs"
+dir = "~/mnt"    # hosts are mounted at <dir>/<alias>
+options = ["reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3"]
 ```
 
 Example directories:

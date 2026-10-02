@@ -4,6 +4,8 @@
 //! is decided by `main.rs` (dispatch) and the respective feature modules.
 
 // `use` brings names from other modules/crates into the current scope.
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 // `#[derive(...)]` is a macro that automatically generates code for traits
@@ -37,6 +39,21 @@ pub enum Command {
     Connect {
         /// Alias of the host.
         alias: String,
+    },
+    /// Open an interactive SFTP session to a host.
+    Sftp {
+        /// Alias of the host.
+        alias: String,
+    },
+    /// Mount a host's file system with sshfs.
+    Mount(MountArgs),
+    /// Unmount a host mounted with `sshire mount`.
+    #[command(visible_alias = "unmount")]
+    Umount {
+        /// Alias of the host.
+        alias: String,
+        /// Mount point, if it was given explicitly when mounting.
+        mountpoint: Option<PathBuf>,
     },
     /// Show the connection log, optionally for a single host.
     Log {
@@ -74,6 +91,18 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         prompt: Vec<String>,
     },
+}
+
+/// Arguments of `sshire mount`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct MountArgs {
+    /// Alias of the host.
+    pub alias: String,
+    /// Local mount point (default: `<mount.dir>/<alias>` from the configuration).
+    pub mountpoint: Option<PathBuf>,
+    /// Remote directory to mount (default: the user's home directory).
+    #[arg(long)]
+    pub path: Option<String>,
 }
 
 /// Arguments of `sshire config`.
@@ -266,6 +295,37 @@ mod tests {
             panic!("expected Add");
         };
         assert!(args.alias.is_none() && args.tags.is_empty());
+    }
+
+    #[test]
+    fn sftp_mount_and_umount_parse() {
+        let cli = Cli::parse_from(["sshire", "sftp", "web"]);
+        assert!(matches!(cli.command, Some(Command::Sftp { ref alias }) if alias == "web"));
+
+        let cli = Cli::parse_from(["sshire", "mount", "web"]);
+        let Some(Command::Mount(args)) = cli.command else {
+            panic!("expected Mount");
+        };
+        assert_eq!(args.alias, "web");
+        assert!(args.mountpoint.is_none() && args.path.is_none());
+
+        let cli = Cli::parse_from(["sshire", "mount", "web", "/tmp/w", "--path", "/var/www"]);
+        let Some(Command::Mount(args)) = cli.command else {
+            panic!("expected Mount");
+        };
+        assert_eq!(
+            args.mountpoint.as_deref(),
+            Some(std::path::Path::new("/tmp/w"))
+        );
+        assert_eq!(args.path.as_deref(), Some("/var/www"));
+
+        for name in ["umount", "unmount"] {
+            let cli = Cli::parse_from(["sshire", name, "web"]);
+            assert!(matches!(
+                cli.command,
+                Some(Command::Umount { ref alias, mountpoint: None }) if alias == "web"
+            ));
+        }
     }
 
     #[test]

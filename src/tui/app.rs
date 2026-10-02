@@ -32,7 +32,8 @@ use super::input::TextInput;
 use super::secret::{DialogEvent, Intent, SecretDialog, Step};
 use crate::commands::sort_hosts;
 // `as AppConfig`: `nucleo_matcher` already ships its own `Config`.
-use crate::config::{Config as AppConfig, DefaultSort, SshConfig};
+use crate::config::{Config as AppConfig, DefaultSort};
+use crate::connect::{self, MountTarget, Programs, Session};
 use crate::secrets::{self, LockState, SecretError, SecretStore, SecretString, check_new_master};
 use crate::store::{Connection, Host, HostSource, HostStats, Store, StoreError, now_ms};
 use crate::timefmt;
@@ -162,6 +163,10 @@ pub enum Action {
     Last,
     /// Connect to the selected host.
     Connect,
+    /// Open an SFTP session to the selected host.
+    Sftp,
+    /// Mount the selected host with sshfs, or unmount it if it is mounted.
+    ToggleMount,
     /// Toggle favorite of the selected host.
     ToggleFavorite,
     /// Next sort order.
@@ -224,6 +229,13 @@ pub enum Effect {
     Connect {
         host: Box<Host>,
         password: Option<SecretString>,
+        /// Shell, SFTP or mount.
+        session: Session,
+    },
+    /// Unmount the host mounted at `mountpoint` (no terminal needed).
+    Unmount {
+        alias: String,
+        mountpoint: std::path::PathBuf,
     },
 }
 
@@ -317,8 +329,8 @@ pub struct App {
     pub show_archived: bool,
     /// Symbol for hosts without their own icon (from the configuration).
     pub icon_fallback: String,
-    /// `[ssh]` settings of the configuration (program, global arguments).
-    ssh: SshConfig,
+    /// `[ssh]`, `[sftp]` and `[mount]` settings of the configuration.
+    programs: Programs,
     /// Open host form (mode [`Mode::Form`]).
     pub form: Option<FormState>,
     /// Open confirmation prompt (mode [`Mode::Confirm`]).
@@ -372,7 +384,11 @@ impl App {
             status: None,
             show_archived: config.show_archived,
             icon_fallback: config.icon_fallback,
-            ssh: config.ssh,
+            programs: Programs {
+                ssh: config.ssh,
+                sftp: config.sftp,
+                mount: config.mount,
+            },
             form: None,
             confirm: None,
             tag_dialog: None,
@@ -578,7 +594,17 @@ impl App {
             Action::Last => self.select(usize::MAX),
             Action::Connect => {
                 if let Some(host) = self.selected_host().cloned() {
-                    return self.begin_connect(host);
+                    return self.begin_connect(host, Session::Shell);
+                }
+            }
+            Action::Sftp => {
+                if let Some(host) = self.selected_host().cloned() {
+                    return self.begin_connect(host, Session::Sftp);
+                }
+            }
+            Action::ToggleMount => {
+                if let Some(host) = self.selected_host().cloned() {
+                    return self.toggle_mount(host);
                 }
             }
             Action::ToggleFavorite => self.toggle_favorite(),
@@ -825,17 +851,18 @@ impl App {
     /// Starts the connection: if the host has a password, it is fetched *now* –
     /// while we are still in the TUI and can ask for the master password
     /// if needed. Only the event loop releases the terminal.
-    fn begin_connect(&mut self, host: Host) -> Effect {
+    fn begin_connect(&mut self, host: Host, session: Session) -> Effect {
         if !host.has_password {
             return Effect::Connect {
                 host: Box::new(host),
                 password: None,
+                session,
             };
         }
         match self.secrets.lock_state() {
-            Ok(LockState::Ready) => self.connect_with_password(host),
+            Ok(LockState::Ready) => self.connect_with_password(host, session),
             Ok(LockState::Locked) => {
-                self.open_secret_dialog(SecretDialog::for_connect(host));
+                self.open_secret_dialog(SecretDialog::for_connect(host, session));
                 Effect::None
             }
             Ok(LockState::NeedsInit) => {
@@ -853,7 +880,7 @@ impl App {
     }
 
     /// Fetches the password from the (unlocked) storage and returns the connect effect.
-    fn connect_with_password(&mut self, host: Host) -> Effect {
+    fn connect_with_password(&mut self, host: Host, session: Session) -> Effect {
         match secrets::fetch_host_password(self.secrets.as_mut(), &self.store, &host) {
             Ok(password) => {
                 if password.is_none() {
@@ -863,6 +890,7 @@ impl App {
                 Effect::Connect {
                     host: Box::new(host),
                     password,
+                    session,
                 }
             }
             Err(err) => {
@@ -873,6 +901,30 @@ impl App {
                 Effect::None
             }
         }
+    }
+
+    /// `m`: mounts the host at its default mount point, or unmounts it if
+    /// something is mounted there already.
+    fn toggle_mount(&mut self, host: Host) -> Effect {
+        let mountpoint = match connect::mount::default_mountpoint(&self.programs.mount, &host.alias)
+        {
+            Ok(path) => path,
+            Err(err) => {
+                self.set_status(StatusKind::Error, format!("Mount point: {err:#}"));
+                return Effect::None;
+            }
+        };
+        if connect::mount::is_mounted(&mountpoint) {
+            return Effect::Unmount {
+                alias: host.alias,
+                mountpoint,
+            };
+        }
+        let target = MountTarget {
+            mountpoint,
+            remote_path: None,
+        };
+        self.begin_connect(host, Session::Mount(target))
     }
 
     fn open_password_dialog(&mut self) {
@@ -913,7 +965,7 @@ impl App {
                 self.mode = Mode::Normal;
                 let text = match dialog.intent {
                     Intent::SetPassword => "Cancelled – password unchanged",
-                    Intent::Connect(_) => "Connection cancelled",
+                    Intent::Connect(..) => "Connection cancelled",
                 };
                 self.set_status(StatusKind::Info, text);
                 Effect::None
@@ -1030,9 +1082,9 @@ impl App {
         // `mem::replace` takes the intent out and leaves a placeholder behind.
         match std::mem::replace(&mut dialog.intent, Intent::SetPassword) {
             Intent::SetPassword => self.finish_set(dialog),
-            Intent::Connect(host) => {
+            Intent::Connect(host, session) => {
                 self.close_secret_dialog();
-                self.connect_with_password(*host)
+                self.connect_with_password(*host, session)
             }
         }
     }
@@ -1268,15 +1320,16 @@ impl App {
         self.set_status(status, text);
     }
 
-    /// Starts the ssh session to `host` (the terminal must be released beforehand).
+    /// Starts the session with `host` (the terminal must be released beforehand).
     ///
     /// The store belongs to the `App`; this way it doesn't have to be handed out.
     pub fn run_connect(
         &self,
         host: &Host,
         password: Option<SecretString>,
+        session: &Session,
     ) -> anyhow::Result<crate::connect::ConnectOutcome> {
-        crate::connect::run(&self.store, host, password, &self.ssh)
+        crate::connect::run(&self.store, host, password, &self.programs, session)
     }
 
     /// Short name of the active password storage ("Keychain" / "encrypted").
@@ -1568,16 +1621,47 @@ mod tests {
     fn connect_action_yields_effect_and_empty_list_does_nothing() {
         let mut app = app();
         match app.update(Action::Connect) {
-            Effect::Connect { host, password } => {
+            Effect::Connect {
+                host,
+                password,
+                session,
+            } => {
                 assert_eq!(host.alias, "alpha");
                 // alpha has no password stored.
                 assert!(password.is_none());
+                assert_eq!(session, Session::Shell);
             }
             other => panic!("unexpected: {other:?}"),
         }
         app.set_query_for_test("#nope");
         assert_eq!(app.update(Action::Connect), Effect::None);
         assert_eq!(app.update(Action::Quit), Effect::Quit);
+    }
+
+    #[test]
+    fn sftp_and_mount_actions_yield_their_session() {
+        let mut app = app();
+        match app.update(Action::Sftp) {
+            Effect::Connect { host, session, .. } => {
+                assert_eq!(host.alias, "alpha");
+                assert_eq!(session, Session::Sftp);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Nothing is mounted at the default mount point: mount.
+        match app.update(Action::ToggleMount) {
+            Effect::Connect {
+                session: Session::Mount(target),
+                ..
+            } => {
+                assert!(target.mountpoint.ends_with("mnt/alpha"));
+                assert_eq!(target.remote_path, None);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        app.set_query_for_test("#nope");
+        assert_eq!(app.update(Action::Sftp), Effect::None);
+        assert_eq!(app.update(Action::ToggleMount), Effect::None);
     }
 
     #[test]
@@ -2047,7 +2131,7 @@ mod tests {
         let mut app = app();
         set_password_via_ui(&mut app, "pw-for-alpha");
         match app.update(Action::Connect) {
-            Effect::Connect { host, password } => {
+            Effect::Connect { host, password, .. } => {
                 assert_eq!(host.alias, "alpha");
                 assert_eq!(password.unwrap().expose(), "pw-for-alpha");
             }
@@ -2156,7 +2240,8 @@ mod tests {
         // New process (new app): the storage is locked again.
         let mut app = encrypted_app(dir.path());
         assert!(app.selected_host().unwrap().has_password);
-        assert_eq!(app.update(Action::Connect), Effect::None);
+        // SFTP: the session kind must survive the unlock dialog.
+        assert_eq!(app.update(Action::Sftp), Effect::None);
         assert_eq!(app.mode, Mode::Secret);
         assert_eq!(app.secret_dialog.as_ref().unwrap().step, Step::Unlock);
         // Wrong master password: error message, dialog stays, no connect.
@@ -2171,9 +2256,14 @@ mod tests {
                 .contains("Wrong")
         );
         match type_and_enter(&mut app, "long enough master") {
-            Effect::Connect { host, password } => {
+            Effect::Connect {
+                host,
+                password,
+                session,
+            } => {
                 assert_eq!(host.alias, "alpha");
                 assert_eq!(password.unwrap().expose(), "host-pw");
+                assert_eq!(session, Session::Sftp);
             }
             other => panic!("unexpected: {other:?}"),
         }
