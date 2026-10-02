@@ -663,7 +663,12 @@ mod tests {
             Path::new("/mnt/v6"),
         )
         .unwrap();
-        assert_eq!(inv.args, ["root@[2001:db8::1]:", "/mnt/v6"]);
+        let mut expected = Vec::new();
+        if cfg!(target_os = "macos") {
+            expected.extend(["-o", "volname=v6"]);
+        }
+        expected.extend(["root@[2001:db8::1]:", "/mnt/v6"]);
+        assert_eq!(inv.args, expected);
     }
 
     #[test]
