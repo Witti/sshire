@@ -564,6 +564,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             Mode::Normal | Mode::Help => &[
                 ("↑↓/jk", "select"),
                 ("⏎", "connect"),
+                ("F", "sftp"),
+                ("m", "mount"),
                 ("/", "search"),
                 ("a", "new"),
                 ("e", "edit"),
